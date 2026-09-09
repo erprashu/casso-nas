@@ -1,5 +1,7 @@
 """Data loading and small training utilities."""
 
+import io
+import os
 import random
 from typing import Tuple
 
@@ -7,7 +9,32 @@ import numpy as np
 import torch
 import torchvision.datasets as dset
 import torchvision.transforms as transforms
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Dataset, Subset
+
+
+class ParquetImageDataset(Dataset):
+    """CIFAR-10/100 loaded from a HuggingFace-hosted parquet file (columns
+    'img': {'bytes': <PNG>, 'path': ...}, 'label': int) -- a much faster
+    download path than torchvision's default (throttled) source for this
+    environment. Decodes PNG bytes to PIL images lazily in __getitem__."""
+
+    def __init__(self, parquet_path: str, transform=None):
+        import pandas as pd
+        from PIL import Image
+        self._Image = Image
+        df = pd.read_parquet(parquet_path, columns=["img", "label"])
+        self.img_bytes = [row["bytes"] for row in df["img"]]
+        self.labels = df["label"].tolist()
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        img = self._Image.open(io.BytesIO(self.img_bytes[idx])).convert("RGB")
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, self.labels[idx]
 
 
 def set_seed(seed: int) -> None:
@@ -23,7 +50,11 @@ CIFAR_STD = {"cifar10": (0.2470, 0.2435, 0.2616), "cifar100": (0.2673, 0.2564, 0
 
 def get_cifar_loaders(dataset: str, data_dir: str, batch_size: int,
                        train_subset: int = None, val_subset: int = None,
-                       num_workers: int = 4) -> Tuple[DataLoader, DataLoader]:
+                       num_workers: int = 4, hf_parquet_dir: str = None) -> Tuple[DataLoader, DataLoader]:
+    """If hf_parquet_dir is given (containing train-*.parquet / test-*.parquet
+    from a HuggingFace 'plain_text' CIFAR mirror), load from there instead of
+    torchvision's default download source, which was observed to be heavily
+    throttled (~110 KB/s) in this environment."""
     assert dataset in ("cifar10", "cifar100")
     mean, std = CIFAR_MEAN[dataset], CIFAR_STD[dataset]
     train_tf = transforms.Compose([
@@ -34,9 +65,15 @@ def get_cifar_loaders(dataset: str, data_dir: str, batch_size: int,
     ])
     val_tf = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean, std)])
 
-    cls = dset.CIFAR10 if dataset == "cifar10" else dset.CIFAR100
-    train_data = cls(root=data_dir, train=True, download=True, transform=train_tf)
-    val_data = cls(root=data_dir, train=False, download=True, transform=val_tf)
+    if hf_parquet_dir is not None:
+        train_path = os.path.join(hf_parquet_dir, "train-00000-of-00001.parquet")
+        test_path = os.path.join(hf_parquet_dir, "test-00000-of-00001.parquet")
+        train_data = ParquetImageDataset(train_path, transform=train_tf)
+        val_data = ParquetImageDataset(test_path, transform=val_tf)
+    else:
+        cls = dset.CIFAR10 if dataset == "cifar10" else dset.CIFAR100
+        train_data = cls(root=data_dir, train=True, download=True, transform=train_tf)
+        val_data = cls(root=data_dir, train=False, download=True, transform=val_tf)
 
     if train_subset is not None:
         train_data = Subset(train_data, list(range(min(train_subset, len(train_data)))))

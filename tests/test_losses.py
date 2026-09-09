@@ -70,34 +70,40 @@ def test_ema_stability_term_skips_layers_missing_from_f_bar_implicitly():
 
 
 def test_kl_consistency_term_matches_manual_kl():
+    """Each pair (active_on_replay_i, archived_i) comes from the SAME
+    replayed batch of inputs for architecture i -- but different archived
+    architectures can be replayed on different batches, so the two active
+    logits in the two pairs are deliberately different tensors here."""
     mmlf = MMLFLoss(beta=0.3, gamma=0.1, eta=1.0, weight_decay=0.0)  # eta=1 to simplify
     torch.manual_seed(0)
-    active_logits = torch.randn(2, 4)
-    archived_logits = [torch.randn(2, 4), torch.randn(2, 4)]
+    pairs = [
+        (torch.randn(2, 4), torch.randn(2, 4)),
+        (torch.randn(2, 4), torch.randn(2, 4)),
+    ]
 
-    term = mmlf.kl_consistency_term(active_logits, archived_logits)
+    term = mmlf.kl_consistency_term(pairs)
 
-    log_p_active = F.log_softmax(active_logits, dim=-1)
     total = 0.0
-    for lg in archived_logits:
-        log_p_i = F.log_softmax(lg, dim=-1)
+    for active_i, archived_i in pairs:
+        log_p_active = F.log_softmax(active_i, dim=-1)
+        log_p_i = F.log_softmax(archived_i, dim=-1)
         kl = F.kl_div(log_p_i, log_p_active, log_target=True, reduction="none").sum(-1).mean()
         total += kl.item()
-    expected = total / len(archived_logits)
+    expected = total / len(pairs)
     assert term.item() == pytest.approx(expected, rel=1e-4)
 
 
 def test_kl_consistency_term_zero_when_identical_distributions():
     mmlf = MMLFLoss(beta=0.3, gamma=0.1, eta=1.0, weight_decay=0.0)
     logits = torch.randn(3, 4)
-    term = mmlf.kl_consistency_term(logits, [logits.clone(), logits.clone()])
+    pairs = [(logits, logits.clone()), (logits, logits.clone())]
+    term = mmlf.kl_consistency_term(pairs)
     assert term.item() == pytest.approx(0.0, abs=1e-6)
 
 
 def test_kl_consistency_term_empty_archive_returns_zero():
     mmlf = MMLFLoss(beta=0.3, gamma=0.1, eta=0.05, weight_decay=0.0)
-    logits = torch.randn(2, 4)
-    term = mmlf.kl_consistency_term(logits, [])
+    term = mmlf.kl_consistency_term([])
     assert term.item() == pytest.approx(0.0)
 
 

@@ -158,6 +158,7 @@ class CASSOSearcher:
         active_params = self.net.active_params(indices)
 
         archived_logits, archived_targets, archived_params_list = [], [], []
+        active_on_replay_logits = []
         f_bar: Dict[int, float] = {}
         if self.archive.members and self.omega:
             archive_nodes = [self.archive_payloads[k].node_keys for k in self.archive.members]
@@ -174,6 +175,13 @@ class CASSOSearcher:
                 archived_logits.append(logits_i)
                 archived_targets.append(ay)
                 archived_params_list.append(self.net.active_params(sample.indices))
+                # Active architecture's prediction on this SAME replay batch
+                # (same ax), needed for a valid same-input KL comparison
+                # (Eq. 10, term 4) -- comparing against active_logits (which
+                # was computed on the unrelated, differently-sized main
+                # training batch x) would be both shape-mismatched and
+                # conceptually meaningless.
+                active_on_replay_logits.append(self.net(ax, hardwts, indices))
 
         layer_weights: Dict[int, list] = {}
         ema_weights: Dict[int, list] = {}
@@ -189,6 +197,7 @@ class CASSOSearcher:
             active_logits, y, active_params,
             archived_logits, archived_targets, archived_params_list,
             layer_weights, ema_weights, f_bar,
+            active_on_replay_logits=active_on_replay_logits,
         )
 
         self.w_optimizer.zero_grad(set_to_none=True)

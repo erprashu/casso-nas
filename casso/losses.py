@@ -1,6 +1,6 @@
 """Multi-Model Regularized Loss Function (MMLF), paper Eq. 10-11."""
 
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -52,20 +52,32 @@ class MMLFLoss(nn.Module):
             total = total + f_bar.get(j, 0.0) * layer_sq
         return self.gamma * total
 
-    def kl_consistency_term(self, logits_active: torch.Tensor,
-                             logits_archived: List[torch.Tensor]) -> torch.Tensor:
-        """eta * (1/m) * sum_i KL(p_active || p_archived_i) (Eq. 10, term 4)."""
-        if not logits_archived:
-            return torch.tensor(0.0, device=logits_active.device)
-        log_p_active = F.log_softmax(logits_active, dim=-1)
-        p_active = log_p_active.exp()
-        total = 0.0
-        for logits_i in logits_archived:
-            log_p_i = F.log_softmax(logits_i, dim=-1)
+    def kl_consistency_term(self, active_archived_pairs: List[Tuple[torch.Tensor, torch.Tensor]]) -> torch.Tensor:
+        """eta * (1/m) * sum_i KL(p_active || p_archived_i) (Eq. 10, term 4).
+
+        Takes a list of (active_logits_i, archived_logits_i) pairs, ONE per
+        archived architecture, where BOTH logits in a pair come from the
+        SAME replayed mini-batch of inputs (the active architecture's
+        current op-selection run on archived architecture i's cached replay
+        batch, vs. that archived architecture's own prediction on it) --
+        "predictive distributions ... on replayed mini-batches" (Sec. 3.5).
+        Comparing the active architecture's logits on a DIFFERENT batch
+        (e.g. the main training batch) would not be a meaningful KL between
+        distributions over the same inputs, and would also generally fail
+        on a batch-size mismatch if the two batches differ in size."""
+        if not active_archived_pairs:
+            first_device = "cpu"
+            return torch.tensor(0.0, device=first_device)
+        device = active_archived_pairs[0][0].device
+        total = torch.tensor(0.0, device=device)
+        for logits_active_i, logits_archived_i in active_archived_pairs:
+            log_p_active = F.log_softmax(logits_active_i, dim=-1)
+            p_active = log_p_active.exp()
+            log_p_i = F.log_softmax(logits_archived_i, dim=-1)
             # KL(p_active || p_i) = sum p_active * (log p_active - log p_i)
             kl = (p_active * (log_p_active - log_p_i)).sum(dim=-1).mean()
             total = total + kl
-        return self.eta * total / len(logits_archived)
+        return self.eta * total / len(active_archived_pairs)
 
     def forward(
         self,
@@ -78,7 +90,12 @@ class MMLFLoss(nn.Module):
         layer_weights: Dict[int, torch.Tensor],
         ema_weights: Dict[int, torch.Tensor],
         f_bar: Dict[int, float],
+        active_on_replay_logits: List[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
+        """active_on_replay_logits[i]: the ACTIVE architecture's logits on
+        archived architecture i's own replay batch (same inputs as
+        archived_logits[i]) -- required to form a valid KL comparison
+        (Eq. 10, term 4); see kl_consistency_term's docstring."""
         m = max(len(archived_logits), 1)
 
         active_term = self.supervised_term(active_logits, active_targets, active_params)
@@ -92,7 +109,9 @@ class MMLFLoss(nn.Module):
             replay_term = torch.tensor(0.0, device=active_logits.device)
 
         stability_term = self.ema_stability_term(layer_weights, ema_weights, f_bar)
-        kl_term = self.kl_consistency_term(active_logits, archived_logits)
+        active_on_replay_logits = active_on_replay_logits or []
+        pairs = list(zip(active_on_replay_logits, archived_logits))
+        kl_term = self.kl_consistency_term(pairs)
 
         total = (
             (1 - self.beta) * active_term

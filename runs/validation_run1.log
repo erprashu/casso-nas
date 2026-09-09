@@ -1,0 +1,27 @@
+Device: cuda
+Loading CIFAR data...
+781 steps/epoch, 781 total steps, 0 warmup steps
+Loading NAS-Bench-201 oracle...
+Supernet params: 1,699,480
+Traceback (most recent call last):
+  File "/home/proxpc/CASSO/casso_code/scripts/search_nb201.py", line 130, in <module>
+    main()
+  File "/home/proxpc/CASSO/casso_code/scripts/search_nb201.py", line 96, in main
+    out = searcher.step(t, train_iter, val_iter, sensitivity_batches=sens_batches)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/proxpc/CASSO/casso_code/casso/train_search.py", line 188, in step
+    loss_dict = self.mmlf(
+                ^^^^^^^^^^
+  File "/home/proxpc/.pyenv/versions/3.12.1/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/proxpc/.pyenv/versions/3.12.1/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/proxpc/CASSO/casso_code/casso/losses.py", line 95, in forward
+    kl_term = self.kl_consistency_term(active_logits, archived_logits)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/proxpc/CASSO/casso_code/casso/losses.py", line 66, in kl_consistency_term
+    kl = (p_active * (log_p_active - log_p_i)).sum(dim=-1).mean()
+                      ~~~~~~~~~~~~~^~~~~~~~~
+RuntimeError: The size of tensor a (64) must match the size of tensor b (8) at non-singleton dimension 0
