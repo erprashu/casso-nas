@@ -13,18 +13,21 @@ from torch.utils.data import DataLoader, Dataset, Subset
 
 
 class ParquetImageDataset(Dataset):
-    """CIFAR-10/100 loaded from a HuggingFace-hosted parquet file (columns
-    'img': {'bytes': <PNG>, 'path': ...}, 'label': int) -- a much faster
-    download path than torchvision's default (throttled) source for this
-    environment. Decodes PNG bytes to PIL images lazily in __getitem__."""
+    """CIFAR-10/100 loaded from a HuggingFace-hosted parquet file (column
+    'img': {'bytes': <PNG>, 'path': ...}, plus a label column) -- a much
+    faster download path than torchvision's default (throttled) source for
+    this environment. Decodes PNG bytes to PIL images lazily in
+    __getitem__. label_column differs by dataset: CIFAR-10's mirror uses
+    'label'; CIFAR-100's uses 'fine_label' (100 classes) with a separate
+    'coarse_label' (20 superclasses) that we don't use here."""
 
-    def __init__(self, parquet_path: str, transform=None):
+    def __init__(self, parquet_path: str, transform=None, label_column: str = "label"):
         import pandas as pd
         from PIL import Image
         self._Image = Image
-        df = pd.read_parquet(parquet_path, columns=["img", "label"])
+        df = pd.read_parquet(parquet_path, columns=["img", label_column])
         self.img_bytes = [row["bytes"] for row in df["img"]]
-        self.labels = df["label"].tolist()
+        self.labels = df[label_column].tolist()
         self.transform = transform
 
     def __len__(self):
@@ -68,8 +71,9 @@ def get_cifar_loaders(dataset: str, data_dir: str, batch_size: int,
     if hf_parquet_dir is not None:
         train_path = os.path.join(hf_parquet_dir, "train-00000-of-00001.parquet")
         test_path = os.path.join(hf_parquet_dir, "test-00000-of-00001.parquet")
-        train_data = ParquetImageDataset(train_path, transform=train_tf)
-        val_data = ParquetImageDataset(test_path, transform=val_tf)
+        label_col = "label" if dataset == "cifar10" else "fine_label"
+        train_data = ParquetImageDataset(train_path, transform=train_tf, label_column=label_col)
+        val_data = ParquetImageDataset(test_path, transform=val_tf, label_column=label_col)
     else:
         cls = dset.CIFAR10 if dataset == "cifar10" else dset.CIFAR100
         train_data = cls(root=data_dir, train=True, download=True, transform=train_tf)

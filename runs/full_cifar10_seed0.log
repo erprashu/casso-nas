@@ -1,0 +1,9 @@
+Device: cuda
+Loading CIFAR data...
+781 steps/epoch, 150733 total steps, 11715 warmup steps
+Loading NAS-Bench-201 oracle...
+Supernet params: 1,699,480
+[step 500/150733] loss=2.166 acc=16.04% archive_size=10 tau_gumbel=10.000 elapsed=41s
+[step 1000/150733] loss=2.045 acc=19.83% archive_size=10 tau_gumbel=9.999 elapsed=120s
+[step 1500/150733] loss=2.012 acc=20.77% archive_size=10 tau_gumbel=9.998 elapsed=238s
+[step 2000/150733] loss=1.953 acc=21.98% archive_size=10 tau_gumbel=9.996 elapsed=396s

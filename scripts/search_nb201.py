@@ -41,22 +41,36 @@ def evaluate_kendall_tau(net: NB201Supernet, oracle: NB201Oracle, dataset: str,
 
 def main():
     parser = argparse.ArgumentParser()
+    # Paper-faithful defaults (Sec. 3.7 / 4.2.2): batch_size=64, warmup=15
+    # epochs, SGD lr 0.025->0.001 cosine, wd=0.0005, momentum=0.9 (already
+    # the CASSOSearcher/CASSOConfig defaults). The paper states search cost
+    # as ~34560s (0.4 GPU-days) but does NOT state an explicit total epoch
+    # count for this search space (only DARTS-space search is explicitly
+    # "50 epochs"). epochs=193 below is THIS SCRIPT'S calibration to hit
+    # that same wall-clock budget, measured empirically on this RTX 5090
+    # from the validated 1-epoch run (781 steps / 179s with archive+MMLF
+    # overhead already included): 34560s / (179s/781 steps) / 781
+    # steps-per-epoch ~= 193 epochs. This is an assumption, not a value
+    # taken verbatim from the paper -- flagged here rather than silently
+    # presented as if it were.
     parser.add_argument("--dataset", default="cifar10", choices=["cifar10", "cifar100"])
-    parser.add_argument("--epochs", type=int, default=2, help="paper default is far larger; "
-                         "start small to validate on real data before a full run")
+    parser.add_argument("--epochs", type=int, default=193,
+                         help="calibrated to match the paper's ~34560s search cost on this "
+                              "GPU; the paper itself does not state an explicit epoch count "
+                              "for NAS-Bench-201 search (see comment above)")
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--base_channels", type=int, default=16)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--data_dir", default=os.path.expanduser("~/CASSO/data/cifar"))
-    parser.add_argument("--hf_parquet_dir", default=os.path.expanduser(
-        "~/CASSO/data/cifar10_hf/plain_text"),
-        help="fast HF mirror path; pass '' to force the (slow) torchvision download instead")
+    parser.add_argument("--hf_parquet_dir", default=None,
+        help="fast HF mirror path; defaults to the right cifar10/cifar100 mirror dir "
+             "for --dataset unless overridden; pass '' to force the (slow) torchvision "
+             "download instead")
     parser.add_argument("--nb201_pkl", default=os.path.expanduser(
         "~/CASSO/data/nasbench201/nasbench201_v1_0-e61699.pkl"))
-    parser.add_argument("--warmup_epochs", type=int, default=0,
-                         help="paper default is 15; use 0 for a short validation run so "
-                              "sensitivity/archive logic actually gets exercised")
-    parser.add_argument("--eval_every_steps", type=int, default=200)
+    parser.add_argument("--warmup_epochs", type=int, default=15,
+                         help="paper value (Sec. 3.7): 'a warmup period of 15 epochs'")
+    parser.add_argument("--eval_every_steps", type=int, default=500)
     parser.add_argument("--kendall_samples", type=int, default=200)
     parser.add_argument("--out", default="run_output.json")
     args = parser.parse_args()
@@ -66,7 +80,14 @@ def main():
     print(f"Device: {device}", flush=True)
 
     print("Loading CIFAR data...", flush=True)
-    hf_dir = args.hf_parquet_dir if (args.hf_parquet_dir and args.dataset == "cifar10") else None
+    if args.hf_parquet_dir is not None:
+        hf_dir = args.hf_parquet_dir or None  # '' means "force torchvision path"
+    else:
+        default_hf_dirs = {
+            "cifar10": os.path.expanduser("~/CASSO/data/cifar10_hf/plain_text"),
+            "cifar100": os.path.expanduser("~/CASSO/data/cifar100_hf/cifar100"),
+        }
+        hf_dir = default_hf_dirs[args.dataset]
     train_loader, val_loader = get_cifar_loaders(args.dataset, args.data_dir, args.batch_size,
                                                   hf_parquet_dir=hf_dir)
     train_iter = infinite_loader(train_loader)
