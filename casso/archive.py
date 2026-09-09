@@ -87,27 +87,57 @@ class StreamingFacilityLocationArchive:
             total += max(g_val, candidate) - g_val
         return total
 
-    def least_contributing_member(self) -> Hashable:
+    def least_contributing_member(self, exclude_stream_point: Optional[Hashable] = None) -> Hashable:
         """arg min_{beta in M} sum_{alpha' in S_t} 1{beta*(alpha')=beta} g(alpha')
-        (Alg. 1, line 6)."""
+        (Alg. 1, line 6). S_t = {alpha^1, ..., alpha^{t-1}} is the stream of
+        PREVIOUSLY sampled architectures (Sec. 3.3) -- it explicitly excludes
+        the architecture currently being offered. `exclude_stream_point`
+        must be set to that incoming candidate's key so its own (typically
+        near-trivial) self-assignment cannot tip which EXISTING member looks
+        least-contributing; omitting this let a brand-new near-duplicate
+        candidate's tiny contribution to an existing member's tally
+        incorrectly cause a high-value, unrelated member to be evicted
+        instead (caught by test_replacement_only_happens_when_marginal_gain_positive)."""
         contribution: Dict[Hashable, float] = {k: 0.0 for k in self.members}
         for other_key, best_key in self._beta_star.items():
+            if other_key == exclude_stream_point:
+                continue
             if best_key in contribution:
                 contribution[best_key] += self._g.get(other_key, 0.0)
         return min(contribution, key=contribution.get)
 
+    def _init_stream_point(self, key: Hashable, kappa: float) -> None:
+        """Correctly seed g(key)/beta*(key) for a brand-new stream point as
+        its best coverage among the CURRENT archive members (Eq. 5's
+        max_{beta in M} term), not a placeholder 0.0. Seeding at 0.0 would
+        silently overstate this point's own marginal gain later (by however
+        well it is already covered) if it is ever itself offered as a
+        candidate -- caught by test_marginal_gain_matches_brute_force_difference."""
+        if key in self._g:
+            return
+        if self.members:
+            best_val, best_key = -math.inf, None
+            for mk in self.members:
+                val = kappa * self._sim(key, mk)
+                if val > best_val:
+                    best_val, best_key = val, mk
+            self._g[key] = 0.0 if best_key is None else best_val
+            self._beta_star[key] = best_key
+        else:
+            self._g[key] = 0.0
+            self._beta_star[key] = None
+
     def offer(self, key: Hashable, kappa: float, payload: object) -> bool:
         """Offer a new architecture to the archive; returns True if accepted."""
         self._stream_kappa[key] = kappa
-        self._g.setdefault(key, 0.0)
-        self._beta_star.setdefault(key, None)
+        self._init_stream_point(key, kappa)
 
         if len(self.members) < self.budget:
             self.members[key] = ArchiveMember(key, kappa, payload)
             self._recompute_g_against(key, kappa)
             return True
 
-        least_key = self.least_contributing_member()
+        least_key = self.least_contributing_member(exclude_stream_point=key)
         gain = self.marginal_gain(key, kappa, excluding=least_key)
         if gain > 0:
             del self.members[least_key]
