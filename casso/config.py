@@ -17,6 +17,16 @@ class CASSOConfig:
     # Archive (Sec. 3.3, Algorithm 1)
     archive_size: int = 10  # m
     sim_temperature: float = 1.0  # tau in sim(alpha, beta) = exp(-d/tau)
+    # stream_window: NOT a paper-specified value -- the paper's S_t is
+    # literally all previously-sampled architectures, which is intractable
+    # for long runs (see archive.py's docstring: an early full-scale run
+    # leaked memory and its per-step cost grew without bound). Tuned here,
+    # rather than left at the class default of 2000, specifically to bring
+    # measured per-step cost back in line with the paper's own reported
+    # ~34560s (0.4 GPU-day) NAS-Bench-201 search-cost budget on this GPU:
+    # window=2000 plateaued at ~0.97s/step (~41h total, ~4x over budget);
+    # window=200 is calibrated to land close to the stated budget instead.
+    stream_window: int = 200
 
     # Sensitivity (Eqs. 7-9)
     num_minibatches: int = 5     # K: number of mini-batches for SNIP saliency

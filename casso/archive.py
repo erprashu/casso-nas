@@ -10,6 +10,7 @@ the complexity analysis added to the manuscript.
 """
 
 import math
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Hashable, List, Optional
 
@@ -29,16 +30,33 @@ class StreamingFacilityLocationArchive:
     """Algorithm 1: Streaming Sensitivity-Facility Location (SFL) for M."""
 
     def __init__(self, budget: int, distance_fn: Callable[[Hashable, Hashable], float],
-                 tau: float = 1.0):
+                 tau: float = 1.0, stream_window: Optional[int] = 2000):
+        """stream_window: the paper's S_t = {alpha^1, ..., alpha^{t-1}}
+        (Sec. 3.3) is literally ALL previously sampled architectures, which
+        is intractable to track for a full training run (a real run of
+        150k+ steps was observed to leak memory linearly -- 17GB+ RSS and
+        climbing per-step cost after only ~2500 steps -- since every one of
+        _stream_kappa/_g/_beta_star grew by one entry per step, forever).
+        The paper's own Table 12 reports a *constant* percentage overhead
+        for archive maintenance, which is only possible if the real
+        implementation bounds S_t somehow; the equations don't specify how,
+        so we bound it to the most recent `stream_window` sampled
+        architectures (current archive members are always kept regardless
+        of arrival order, since they must remain valid facilities). Pass
+        None to restore the literal unbounded definition (fine for tests
+        with a small, finite stream)."""
         self.budget = budget
         self.distance_fn = distance_fn
         self.tau = tau
+        self.stream_window = stream_window
         self.members: Dict[Hashable, ArchiveMember] = {}
-        # O(1)-per-element scalar caches over the full stream S_t (Sec. 3.3
-        # complexity paragraph): g(alpha') and its best-serving archive key.
+        # O(1)-per-element scalar caches over the (bounded) stream S_t
+        # (Sec. 3.3 complexity paragraph): g(alpha') and its best-serving
+        # archive key.
         self._g: Dict[Hashable, float] = {}
         self._beta_star: Dict[Hashable, Optional[Hashable]] = {}
         self._stream_kappa: Dict[Hashable, float] = {}
+        self._arrival_order: deque = deque()
 
     def __len__(self):
         return len(self.members)
@@ -127,24 +145,56 @@ class StreamingFacilityLocationArchive:
             self._g[key] = 0.0
             self._beta_star[key] = None
 
-    def offer(self, key: Hashable, kappa: float, payload: object) -> bool:
-        """Offer a new architecture to the archive; returns True if accepted."""
+    def _evict_stale(self) -> List[Hashable]:
+        """Drop the oldest tracked stream points once _arrival_order exceeds
+        stream_window, EXCEPT current archive members (which must remain
+        valid facilities regardless of how long ago they arrived). Returns
+        the keys actually evicted, so callers (e.g. train_search.py) can
+        prune any parallel bookkeeping (cached replay batches, etc.) keyed
+        by the same ids -- otherwise fixing the leak here just moves it
+        into the caller's own payload dict."""
+        evicted = []
+        if self.stream_window is None:
+            return evicted
+        while len(self._arrival_order) > self.stream_window:
+            candidate = self._arrival_order.popleft()
+            if candidate in self.members:
+                continue  # keep members regardless of arrival order
+            if candidate in self._stream_kappa:
+                del self._stream_kappa[candidate]
+                self._g.pop(candidate, None)
+                self._beta_star.pop(candidate, None)
+                evicted.append(candidate)
+        return evicted
+
+    def offer(self, key: Hashable, kappa: float, payload: object):
+        """Offer a new architecture to the archive. Returns (accepted,
+        evicted): `accepted` is True iff `key` was admitted into the archive
+        itself (the old return value); `evicted` is the list of unrelated
+        stream-point keys the sliding window dropped as a side effect of
+        this call (see _evict_stale) -- callers that cache their own
+        per-key data (e.g. train_search.py's archive_payloads) MUST prune
+        those keys too, or fixing the leak here just relocates it."""
         self._stream_kappa[key] = kappa
         self._init_stream_point(key, kappa)
+        self._arrival_order.append(key)
 
+        accepted = False
         if len(self.members) < self.budget:
             self.members[key] = ArchiveMember(key, kappa, payload)
             self._recompute_g_against(key, kappa)
-            return True
+            accepted = True
+        else:
+            least_key = self.least_contributing_member(exclude_stream_point=key)
+            gain = self.marginal_gain(key, kappa, excluding=least_key)
+            if gain > 0:
+                del self.members[least_key]
+                self.members[key] = ArchiveMember(key, kappa, payload)
+                self._full_g_recompute()
+                accepted = True
 
-        least_key = self.least_contributing_member(exclude_stream_point=key)
-        gain = self.marginal_gain(key, kappa, excluding=least_key)
-        if gain > 0:
-            del self.members[least_key]
-            self.members[key] = ArchiveMember(key, kappa, payload)
-            self._full_g_recompute()
-            return True
-        return False
+        evicted = self._evict_stale()
+        return accepted, evicted
 
     def payloads(self) -> List[object]:
         return [m.payload for m in self.members.values()]

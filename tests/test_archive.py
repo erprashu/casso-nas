@@ -37,9 +37,57 @@ def dist(a, b):
 def test_fills_to_budget_without_replacement_logic():
     arch = StreamingFacilityLocationArchive(budget=3, distance_fn=dist, tau=1.0)
     for k in [0.0, 5.0, 10.0]:
-        assert arch.offer(k, kappa=1.0, payload=k) is True
+        accepted, evicted = arch.offer(k, kappa=1.0, payload=k)
+        assert accepted is True
+        assert evicted == [], "stream is tiny; nothing should age out of the default window"
     assert len(arch) == 3
     assert set(arch.members.keys()) == {0.0, 5.0, 10.0}
+
+
+def test_stream_window_bounds_memory_without_disturbing_members():
+    """The sliding window (added after a real 150k-step run was observed to
+    leak ~17GB+ RSS from unboundedly growing _stream_kappa/_g/_beta_star)
+    must evict old NON-member stream points once the window fills, while
+    never evicting a current archive member regardless of arrival order.
+
+    Tests _evict_stale() directly against hand-seeded bookkeeping, rather
+    than driving it through offer()'s full accept/replace decision -- doing
+    the latter with deliberately-mismatched kappa values was found to
+    trigger a real (and separately documented) property of the paper's own
+    Algorithm 1 acceptance rule, which would have made this test about the
+    wrong thing entirely."""
+    window = 5
+    arch = StreamingFacilityLocationArchive(budget=2, distance_fn=dist, tau=1.0,
+                                             stream_window=window)
+    # Seed two members directly (bypassing offer()'s decision logic; we
+    # only want to test _evict_stale() here).
+    from casso.archive import ArchiveMember
+    arch.members[0.0] = ArchiveMember(0.0, 100.0, 0.0)
+    arch.members[1000.0] = ArchiveMember(1000.0, 100.0, 1000.0)
+    for k in (0.0, 1000.0):
+        arch._stream_kappa[k] = 100.0
+        arch._arrival_order.append(k)
+        arch._g[k] = 100.0
+        arch._beta_star[k] = k
+
+    all_evicted = []
+    for i in range(2, 30):
+        arch._stream_kappa[float(i)] = 1.0
+        arch._arrival_order.append(float(i))
+        arch._g[float(i)] = 1.0
+        arch._beta_star[float(i)] = float(i)
+        all_evicted.extend(arch._evict_stale())
+
+    # The two members must never have been evicted, even though they are
+    # by far the OLDEST entries in arrival order.
+    assert 0.0 not in all_evicted
+    assert 1000.0 not in all_evicted
+    assert set(arch.members.keys()) == {0.0, 1000.0}
+
+    # Tracked stream size must stay bounded (window + however many members
+    # happen to also still be within the window), not grow with total offers.
+    assert len(arch._stream_kappa) <= window + len(arch.members)
+    assert len(all_evicted) > 0, "with 28 extra offers against a window of 5, evictions must occur"
 
 
 def test_facility_location_value_matches_brute_force_after_every_offer():
@@ -71,7 +119,7 @@ def test_replacement_only_happens_when_marginal_gain_positive():
 
     # An exact duplicate of an existing member contributes ZERO marginal
     # gain (it can't cover anything better than the original already does).
-    accepted = arch.offer(0.0 + 1e-9, kappa=0.001, payload="near-dup")
+    accepted, _ = arch.offer(0.0 + 1e-9, kappa=0.001, payload="near-dup")
     f_after = arch.facility_location_value()
 
     if accepted:
