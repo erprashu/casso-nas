@@ -15,6 +15,7 @@ from scipy.stats import kendalltau
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from casso.checkpoint import load_checkpoint, save_checkpoint  # noqa: E402
 from casso.config import CASSOConfig  # noqa: E402
 from casso.nb201.api_wrapper import NB201Oracle  # noqa: E402
 from casso.nb201.genotype_utils import operation_strength, parse_arch_string  # noqa: E402
@@ -73,7 +74,16 @@ def main():
     parser.add_argument("--eval_every_steps", type=int, default=500)
     parser.add_argument("--kendall_samples", type=int, default=200)
     parser.add_argument("--out", default="run_output.json")
+    parser.add_argument("--checkpoint", default=None,
+                         help="path to save/resume training state; defaults to --out with "
+                              "a .ckpt extension. Added after repeated container-level "
+                              "restarts killed multi-hour runs at 89-94% complete with no "
+                              "way to resume -- if this file exists at startup, training "
+                              "resumes from it instead of starting over from step 0.")
+    parser.add_argument("--checkpoint_every_steps", type=int, default=2000)
     args = parser.parse_args()
+    if args.checkpoint is None:
+        args.checkpoint = os.path.splitext(args.out)[0] + ".ckpt"
 
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -112,8 +122,15 @@ def main():
     loss_meter, acc_meter = AverageMeter(), AverageMeter()
     history = []
     t_start = time.time()
+    start_step = 1
 
-    for t in range(1, total_steps + 1):
+    resumed_step = load_checkpoint(args.checkpoint, searcher)
+    if resumed_step is not None:
+        start_step = resumed_step + 1
+        print(f"Resumed from checkpoint {args.checkpoint} at step {resumed_step} "
+              f"({resumed_step / total_steps * 100:.1f}% already done)", flush=True)
+
+    for t in range(start_step, total_steps + 1):
         out = searcher.step(t, train_iter, val_iter, sensitivity_batches=sens_batches)
         loss_meter.update(out["loss"])
         acc_meter.update(out["acc"])
@@ -127,6 +144,9 @@ def main():
                              "archive_size": len(searcher.archive), "elapsed_s": elapsed})
             loss_meter.reset()
             acc_meter.reset()
+
+        if t % args.checkpoint_every_steps == 0 or t == total_steps:
+            save_checkpoint(args.checkpoint, searcher, t)
 
     print("Evaluating Kendall-tau against NAS-Bench-201 ground truth...", flush=True)
     tau, p_value, n_valid = evaluate_kendall_tau(
