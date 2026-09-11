@@ -4,3 +4,5 @@ data/
 *.pth
 *.pkl
 .pytest_cache/
+*.ckpt
+runs/tmux_pane.log

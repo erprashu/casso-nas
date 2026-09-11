@@ -1,0 +1,29 @@
+Device: cuda
+Loading CIFAR data...
+781 steps/epoch, 150733 total steps, 11715 warmup steps
+Loading NAS-Bench-201 oracle...
+Supernet params: 1,699,480
+[step 500/150733] loss=2.163 acc=15.91% archive_size=10 tau_gumbel=10.000 elapsed=41s
+[step 1000/150733] loss=2.049 acc=19.19% archive_size=10 tau_gumbel=9.999 elapsed=120s
+[step 1500/150733] loss=2.024 acc=20.17% archive_size=10 tau_gumbel=9.998 elapsed=238s
+[step 2000/150733] loss=1.965 acc=20.98% archive_size=10 tau_gumbel=9.996 elapsed=396s
+[step 2500/150733] loss=1.933 acc=21.61% archive_size=10 tau_gumbel=9.993 elapsed=575s
+[step 3000/150733] loss=1.868 acc=22.62% archive_size=10 tau_gumbel=9.990 elapsed=752s
+[step 3500/150733] loss=1.834 acc=23.55% archive_size=10 tau_gumbel=9.987 elapsed=931s
+[step 4000/150733] loss=1.807 acc=24.41% archive_size=10 tau_gumbel=9.983 elapsed=1109s
+[step 4500/150733] loss=1.773 acc=24.49% archive_size=10 tau_gumbel=9.978 elapsed=1286s
+[step 5000/150733] loss=1.739 acc=25.61% archive_size=10 tau_gumbel=9.973 elapsed=1463s
+[step 5500/150733] loss=1.718 acc=26.36% archive_size=10 tau_gumbel=9.968 elapsed=1643s
+[step 6000/150733] loss=1.682 acc=26.75% archive_size=10 tau_gumbel=9.961 elapsed=1820s
+[step 6500/150733] loss=1.656 acc=27.18% archive_size=10 tau_gumbel=9.955 elapsed=1998s
+[step 7000/150733] loss=1.627 acc=27.70% archive_size=10 tau_gumbel=9.947 elapsed=2176s
+[step 7500/150733] loss=1.597 acc=28.60% archive_size=10 tau_gumbel=9.940 elapsed=2355s
+[step 8000/150733] loss=1.589 acc=28.22% archive_size=10 tau_gumbel=9.931 elapsed=2533s
+[step 8500/150733] loss=1.553 acc=29.25% archive_size=10 tau_gumbel=9.923 elapsed=2758s
+[step 9000/150733] loss=1.532 acc=29.41% archive_size=10 tau_gumbel=9.913 elapsed=3246s
+[step 9500/150733] loss=1.516 acc=30.10% archive_size=10 tau_gumbel=9.903 elapsed=3734s
+[step 10000/150733] loss=1.501 acc=30.23% archive_size=10 tau_gumbel=9.893 elapsed=4229s
+[step 10500/150733] loss=1.484 acc=30.76% archive_size=10 tau_gumbel=9.882 elapsed=4721s
+[step 11000/150733] loss=1.479 acc=30.11% archive_size=10 tau_gumbel=9.870 elapsed=5212s
+[step 11500/150733] loss=1.470 acc=30.40% archive_size=10 tau_gumbel=9.858 elapsed=5699s
+[step 12000/150733] loss=1.798 acc=30.00% archive_size=10 tau_gumbel=9.846 elapsed=6259s
