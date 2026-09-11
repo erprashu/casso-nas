@@ -81,6 +81,16 @@ def main():
                               "way to resume -- if this file exists at startup, training "
                               "resumes from it instead of starting over from step 0.")
     parser.add_argument("--checkpoint_every_steps", type=int, default=2000)
+    parser.add_argument("--kendall_every_steps", type=int, default=0,
+                         help="if >0, evaluate Kendall-tau against the oracle periodically "
+                              "during training (not just at the end), and log the fraction of "
+                              "edges whose argmax op is 'none'. Added after seed 0's full run "
+                              "finished with Kendall-tau=-0.22 (vs. the paper's target +0.53): "
+                              "diagnosis showed the supernet's arch_logits had collapsed toward "
+                              "favoring the trivial 'none' op on 5/6 edges (a DARTS-lineage "
+                              "failure mode), and we had no visibility into WHEN this happened "
+                              "during the 150k-step run, only the final state. 0 disables this "
+                              "(matches the original behavior exactly).")
     args = parser.parse_args()
     if args.checkpoint is None:
         args.checkpoint = os.path.splitext(args.out)[0] + ".ckpt"
@@ -148,14 +158,28 @@ def main():
         if t % args.checkpoint_every_steps == 0 or t == total_steps:
             save_checkpoint(args.checkpoint, searcher, t)
 
+        if args.kendall_every_steps > 0 and (t % args.kendall_every_steps == 0):
+            with torch.no_grad():
+                none_frac = (net.arch_logits.detach().cpu().argmax(dim=-1) == 0).float().mean().item()
+            tau_mid, p_mid, n_mid = evaluate_kendall_tau(
+                net, oracle, args.dataset, args.kendall_samples, seed=args.seed
+            )
+            print(f"[step {t}/{total_steps}] MID-TRAINING Kendall-tau={tau_mid:.4f} "
+                  f"(p={p_mid:.4g}, n={n_mid}) none_op_argmax_fraction={none_frac:.2f}", flush=True)
+            history.append({"step": t, "mid_kendall_tau": tau_mid, "none_op_argmax_fraction": none_frac})
+
     print("Evaluating Kendall-tau against NAS-Bench-201 ground truth...", flush=True)
     tau, p_value, n_valid = evaluate_kendall_tau(
         net, oracle, args.dataset, args.kendall_samples, seed=args.seed
     )
-    print(f"Kendall-tau = {tau:.4f} (p={p_value:.4g}, n={n_valid})", flush=True)
+    with torch.no_grad():
+        final_none_frac = (net.arch_logits.detach().cpu().argmax(dim=-1) == 0).float().mean().item()
+    print(f"Kendall-tau = {tau:.4f} (p={p_value:.4g}, n={n_valid}) "
+          f"none_op_argmax_fraction={final_none_frac:.2f}", flush=True)
 
     result = {
         "args": vars(args),
+        "final_none_op_argmax_fraction": final_none_frac,
         "history": history,
         "kendall_tau": tau,
         "kendall_p_value": p_value,
