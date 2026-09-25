@@ -62,18 +62,27 @@ class DARTSSearchCell(nn.Module):
 
     def forward(self, s0: torch.Tensor, s1: torch.Tensor,
                 hardwts: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+        """See casso/nb201/cell.py::NB201SearchCell.forward for why the
+        non-selected ops' straight-through weights must also be summed in
+        directly (GDAS gradient routing to all architecture logits, not
+        just the selected one's softmax-Jacobian row)."""
         s0 = self.preprocess0(s0)
         s1 = self.preprocess1(s1)
         states = [s0, s1]
+        num_ops = hardwts.shape[1]
         for node in range(2, self.steps + 2):
             incoming = []
             for e_idx, (n, pred) in enumerate(EDGE_LIST):
                 if n != node:
                     continue
-                op_name = DARTS_PRIMITIVES[indices[e_idx].item()]
+                sel = indices[e_idx].item()
+                op_name = DARTS_PRIMITIVES[sel]
                 key = f"{e_idx}::{op_name}"
                 out = self.edges[key](states[pred])
-                incoming.append(hardwts[e_idx, indices[e_idx]] * out)
+                edge_term = hardwts[e_idx, sel] * out
+                other = [k for k in range(num_ops) if k != sel]
+                edge_term = edge_term + hardwts[e_idx, other].sum()
+                incoming.append(edge_term)
             states.append(sum(incoming))
         return torch.cat(states[2:], dim=1)
 

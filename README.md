@@ -54,8 +54,19 @@ python3 -m pytest tests/ -v
 # End-to-end smoke test (synthetic data)
 python3 tests/test_smoke_nb201.py
 
-# Search on NAS-Bench-201
+# One-time: extract the NAS-Bench-201 ground truth used by the search and
+# evaluation scripts into a small JSON cache (~2 MB)
+python3 scripts/build_oracle_cache.py --pkl <path>/nasbench201_v1_0-e61699.pkl \
+    --out <path>/nb201_test_acc_cache.json
+
+# Search on NAS-Bench-201 (paper protocol: seeds 0-3)
 python3 scripts/search_nb201.py --dataset cifar10 --seed 0 --out runs/run.json
+
+# Inherited-weight ranking fidelity of a saved search checkpoint (Table 5):
+# 200 architectures sampled per seed, BatchNorm re-estimated per path,
+# Kendall-tau against NAS-Bench-201 ground truth
+python3 scripts/eval_checkpoint_ranking.py --ckpt runs/run.ckpt \
+    --dataset cifar10 --seed 0 --out runs/eval_seed0.json
 
 # Search on the DARTS space, then retrain the discovered genotype
 python3 scripts/search_darts.py --seed 0 --out runs/darts_run.json
@@ -64,8 +75,10 @@ python3 scripts/retrain_darts.py --genotype runs/darts_run.json
 
 ## Data dependencies
 
-- NAS-Bench-201 benchmark file (`nasbench201_v1_0-e61699.pkl`), loaded via
-  `casso/nb201/api_wrapper.py`.
+- NAS-Bench-201 benchmark file (`nasbench201_v1_0-e61699.pkl`). The search and
+  evaluation scripts read the compact cache written by
+  `scripts/build_oracle_cache.py`; loading the full file instead peaks at
+  about 16 GB of RAM per process (`casso/nb201/api_wrapper.py` accepts either).
 - CIFAR-10/CIFAR-100, loaded via `casso/utils.py`; a HuggingFace parquet
   mirror path can be passed with `--hf_parquet_dir`, falling back to
   torchvision's own download otherwise.
@@ -76,3 +89,12 @@ Neither dataset is bundled in this repository.
 
 PyTorch with CUDA support, `scipy`, `nas_201_api`. See `casso/config.py`
 for the exact hyperparameter defaults used in the paper's experiments.
+
+## Changes
+
+- The single-path GDAS forward pass (`casso/nb201/cell.py`,
+  `casso/darts/cell.py`) now adds the straight-through weights of the
+  non-selected operations to each edge, as in the reference GDAS
+  implementation. This leaves the forward value unchanged and routes gradient
+  to every architecture logit. The checkpoints evaluated for Table 5 were
+  trained before this change.

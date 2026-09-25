@@ -68,7 +68,11 @@ def main():
              "for --dataset unless overridden; pass '' to force the (slow) torchvision "
              "download instead")
     parser.add_argument("--nb201_pkl", default=os.path.expanduser(
-        "~/CASSO/data/nasbench201/nasbench201_v1_0-e61699.pkl"))
+        "~/CASSO/data/nasbench201/nb201_test_acc_cache.json"),
+        help="ground-truth source: the ~2MB .json cache from "
+             "scripts/build_oracle_cache.py (default), or the full benchmark "
+             ".pkl (~16GB peak RSS to load; concurrent runs loading it OOM'd "
+             "the machine)")
     parser.add_argument("--warmup_epochs", type=int, default=15,
                          help="paper value (Sec. 3.7): 'a warmup period of 15 epochs'")
     parser.add_argument("--eval_every_steps", type=int, default=500)

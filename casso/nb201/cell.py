@@ -58,17 +58,40 @@ class NB201SearchCell(nn.Module):
 
     def forward(self, x: torch.Tensor, hardwts: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
         """hardwts: (NUM_EDGES, |PRIMITIVES|) straight-through weights.
-        indices: (NUM_EDGES,) selected primitive index per edge."""
+        indices: (NUM_EDGES,) selected primitive index per edge.
+
+        GDAS straight-through forward (Dong & Yang 2019; verified against
+        the official NAS-Bench-201/GDAS reference, search_cells.py::
+        forward_gdas): the SELECTED op at each edge is actually executed and
+        scaled by its (numerically ~1) straight-through weight, but every
+        OTHER candidate op at that edge must also contribute its own
+        straight-through weight (numerically ~0, since hard = one_hot -
+        probs.detach() + probs) DIRECTLY to the node sum -- without
+        executing its forward pass. This adds exactly zero to the forward
+        VALUE (each unselected weight is ~0 in the forward pass) but is
+        required for the backward pass: it is what routes gradient to the
+        *non-selected* architecture logits at all. Without this term (as in
+        an earlier version of this function), only the selected logit's
+        softmax-Jacobian row receives gradient, which is a materially
+        different and, empirically, degenerate training signal -- it
+        reproducibly collapsed the learned architecture logits toward the
+        trivial 'none' op on 5/6 edges instead of differentiating them.
+        """
         nodes = [x]
+        num_ops = hardwts.shape[1]
         for node_idx in range(1, NUM_NODES):
             incoming = []
             for e_idx, (j, i) in enumerate(EDGE_LIST):
                 if j != node_idx:
                     continue
-                op_name = NB201_PRIMITIVES[indices[e_idx].item()]
+                sel = indices[e_idx].item()
+                op_name = NB201_PRIMITIVES[sel]
                 key = f"{e_idx}::{op_name}"
                 out = self.edges[key](nodes[i])
-                incoming.append(hardwts[e_idx, indices[e_idx]] * out)
+                edge_term = hardwts[e_idx, sel] * out
+                other = [k for k in range(num_ops) if k != sel]
+                edge_term = edge_term + hardwts[e_idx, other].sum()
+                incoming.append(edge_term)
             nodes.append(sum(incoming))
         return nodes[-1]
 
