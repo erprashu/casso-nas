@@ -53,8 +53,14 @@ CIFAR_STD = {"cifar10": (0.2470, 0.2435, 0.2616), "cifar100": (0.2673, 0.2564, 0
 
 def get_cifar_loaders(dataset: str, data_dir: str, batch_size: int,
                        train_subset: int = None, val_subset: int = None,
-                       num_workers: int = 4, hf_parquet_dir: str = None) -> Tuple[DataLoader, DataLoader]:
-    """If hf_parquet_dir is given (containing train-*.parquet / test-*.parquet
+                       num_workers: int = 4, hf_parquet_dir: str = None,
+                       search_split: bool = False) -> Tuple[DataLoader, DataLoader]:
+    """search_split=True returns (train, valid) loaders built from two
+    disjoint halves of the CIFAR *training* set (fixed permutation, seed 0),
+    following the NAS-Bench-201 search protocol, so that architecture search
+    never sees the test split. search_split=False returns (train, test).
+
+    If hf_parquet_dir is given (containing train-*.parquet / test-*.parquet
     from a HuggingFace 'plain_text' CIFAR mirror), load from there instead of
     torchvision's default download source, which was observed to be heavily
     throttled (~110 KB/s) in this environment."""
@@ -78,6 +84,14 @@ def get_cifar_loaders(dataset: str, data_dir: str, batch_size: int,
         cls = dset.CIFAR10 if dataset == "cifar10" else dset.CIFAR100
         train_data = cls(root=data_dir, train=True, download=True, transform=train_tf)
         val_data = cls(root=data_dir, train=False, download=True, transform=val_tf)
+
+    if search_split:
+        # Same augmentation for both halves, as in the NAS-Bench-201 search code.
+        full = train_data
+        perm = torch.randperm(len(full), generator=torch.Generator().manual_seed(0)).tolist()
+        half = len(full) // 2
+        train_data = Subset(full, perm[:half])
+        val_data = Subset(full, perm[half:])
 
     if train_subset is not None:
         train_data = Subset(train_data, list(range(min(train_subset, len(train_data)))))

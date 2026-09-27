@@ -73,6 +73,42 @@ python3 scripts/search_darts.py --seed 0 --out runs/darts_run.json
 python3 scripts/retrain_darts.py --genotype runs/darts_run.json
 ```
 
+## CASSO on the official NAS-Bench-201 search code
+
+`scripts/official_nb201.py` adds CASSO to the official NAS-Bench-201 search
+code ([D-X-Y/AutoDL-Projects](https://github.com/D-X-Y/AutoDL-Projects),
+installed as `xautodl`), so that the baselines and CASSO share the reference
+supernet (`TinyNetworkGDAS`), train/valid split (`cifar-split.txt`) and GDAS
+configuration (250 epochs, SGD-Nesterov 0.025 with cosine decay, batch 64,
+Gumbel temperature 10 -> 0.1). `--sampler gdas|uniform` selects GDAS or
+uniform (SPOS-style) path sampling; `--method vanilla|casso` trains with plain
+cross-entropy or with CASSO (sensitivity scores, streaming archive, MMLF).
+After search, inherited-weight Kendall-tau is computed on 200 seeded
+NAS-Bench-201 architectures using held-out batches from the valid half.
+
+```bash
+git clone https://github.com/D-X-Y/AutoDL-Projects && pip install -e AutoDL-Projects
+export AUTODL_ROOT=AutoDL-Projects          # configs/nas-benchmark
+export CASSO_DATA=<dir>/cifar.python        # CIFAR in xautodl's python format
+export NB201_CACHE=<path>/nb201_test_acc_cache.json
+
+# One run (checkpointed every epoch; re-running the command resumes it)
+python3 scripts/official_nb201.py --sampler gdas --method casso --rand_seed 0 \
+    --out runs/official/cifar10_s0_gdas_casso_e250.json
+
+# All four configurations for one seed, one after another
+SEED=0 PY=python3 bash scripts/official_queue.sh
+
+# Ranking fidelity, derived architecture and its benchmark accuracy for a
+# saved checkpoint
+python3 scripts/eval_official_ckpt.py --ckpt runs/official/cifar10_s0_gdas_casso_e250.pth
+```
+
+Evaluation uses batch statistics in every BatchNorm layer: the official
+supernet's stem, residual-block and final BatchNorm layers keep running
+statistics averaged over all sampled paths, which are invalid for any single
+architecture.
+
 ## Data dependencies
 
 - NAS-Bench-201 benchmark file (`nasbench201_v1_0-e61699.pkl`). The search and
@@ -98,3 +134,13 @@ for the exact hyperparameter defaults used in the paper's experiments.
   implementation. This leaves the forward value unchanged and routes gradient
   to every architecture logit. The checkpoints evaluated for Table 5 were
   trained before this change.
+- `scripts/search_nb201.py` gains `--sampler gdas|uniform` and
+  `--method casso|vanilla` (baselines on the same supernet), and MMLF weight
+  overrides (`--beta`, `--gamma`, `--eta`). Search now uses two disjoint
+  halves of the CIFAR training set by default (`--no_search_split` restores
+  the old train/test behavior). Weight decay is applied once, by the
+  optimizer, gradient clipping covers only the supernet weights, and replayed
+  archive members are drawn at random (`replay_k`) instead of always the
+  first three.
+- Added `scripts/official_nb201.py`, `scripts/official_queue.sh` and
+  `scripts/eval_official_ckpt.py` (section above).

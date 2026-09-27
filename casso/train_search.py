@@ -2,6 +2,7 @@
 the NAS-Bench-201 search space (Sec. 3.7, Sec. 4.2.2)."""
 
 import math
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -47,9 +48,26 @@ def cosine_temperature(t: int, total_steps: int, tau0: float, tau_min: float) ->
 
 
 class CASSOSearcher:
+    SAMPLERS = ("gdas", "uniform")
+    METHODS = ("casso", "vanilla")
+
     def __init__(self, supernet: NB201Supernet, cfg: CASSOConfig, device: torch.device,
                  total_steps: int, warmup_steps: int, num_stages: int = 3,
-                 cells_per_stage: int = 5):
+                 cells_per_stage: int = 5, sampler: str = "gdas", method: str = "casso",
+                 replay_k: int = 3, rng_seed: int = 0):
+        """sampler: 'gdas' samples paths by Gumbel-softmax over learned logits
+        phi (updated on the validation split); 'uniform' samples every edge's
+        operation uniformly and never updates phi (SPOS-style).
+        method: 'casso' trains W with MMLF (archive, replay, EMA stability, KL);
+        'vanilla' trains W with plain cross-entropy on the sampled path (no
+        archive, sensitivity, or EMA), giving the GDAS / SPOS baselines.
+        replay_k: number of archive members replayed per step, drawn uniformly
+        at random from the archive each step."""
+        assert sampler in self.SAMPLERS and method in self.METHODS
+        self.sampler = sampler
+        self.method = method
+        self.replay_k = replay_k
+        self._rng = random.Random(rng_seed)
         self.net = supernet.to(device)
         self.cfg = cfg
         self.device = device
@@ -58,9 +76,12 @@ class CASSOSearcher:
         self.num_stages = num_stages
         self.cells_per_stage = cells_per_stage
 
+        # Weight decay (lambda in Eq. 10) is applied once, by the optimizer;
+        # the MMLF loss is constructed with weight_decay=0 below so that it is
+        # not applied a second time through an explicit L2 term.
+        self.w_params = [p for n, p in self.net.named_parameters() if n != "arch_logits"]
         self.w_optimizer = torch.optim.SGD(
-            [p for n, p in self.net.named_parameters() if n != "arch_logits"],
-            lr=0.025, momentum=0.9, weight_decay=cfg.weight_decay,
+            self.w_params, lr=0.025, momentum=0.9, weight_decay=cfg.weight_decay,
         )
         self.w_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.w_optimizer, T_max=total_steps, eta_min=0.001
@@ -85,7 +106,7 @@ class CASSOSearcher:
                 self._param_name_to_layer[name] = layer
 
         self.criterion = nn.CrossEntropyLoss()
-        self.mmlf = MMLFLoss(cfg.beta, cfg.gamma, cfg.eta, cfg.weight_decay)
+        self.mmlf = MMLFLoss(cfg.beta, cfg.gamma, cfg.eta, weight_decay=0.0)
         self.ema = EMATeacher(self.net, cfg.ema_decay)
 
         self.archive = StreamingFacilityLocationArchive(
@@ -107,16 +128,26 @@ class CASSOSearcher:
     def _node_param_map(self):
         return self.net.all_node_param_map()
 
+    def sample_path(self, tau: float):
+        """One discrete path: Gumbel-softmax over phi (gdas), or an operation
+        drawn uniformly per edge (uniform; one-hot weights, no gradient to phi)."""
+        if self.sampler == "gdas":
+            return self.net.sample_architecture(tau)
+        num_edges, num_ops = self.net.arch_logits.shape
+        indices = torch.randint(0, num_ops, (num_edges,))
+        hardwts = torch.zeros(num_edges, num_ops, device=self.device)
+        hardwts[torch.arange(num_edges), indices] = 1.0
+        return hardwts, indices
+
     def refresh_sensitivity(self, minibatches, tau: float = None):
         """Eq. 7 at the CURRENT weights theta_t (Sec. 3.4/3.7): each of the K
-        mini-batches samples its own single-path architecture (Gumbel-softmax
-        at the current temperature) and back-propagates through it, so the
-        resulting s_bar/variance reflect whichever nodes were touched across
-        those K draws -- consistent with chi(u) tracking only visited nodes."""
+        mini-batches is run through one path drawn by the active sampler, so
+        s_bar/variance reflect the nodes touched across those K draws --
+        consistent with chi(u) tracking only visited nodes."""
         tau = tau if tau is not None else self.cfg.gumbel_tau_min
 
         def forward_fn(x):
-            hardwts, indices = self.net.sample_architecture(tau)
+            hardwts, indices = self.sample_path(tau)
             return self.net(x, hardwts, indices)
 
         s_bar, variance = compute_snip_saliency(
@@ -143,45 +174,84 @@ class CASSOSearcher:
 
     def step(self, t: int, train_iter, val_iter, sensitivity_batches=None) -> Dict[str, float]:
         tau = cosine_temperature(t, self.total_steps, self.cfg.gumbel_tau_init, self.cfg.gumbel_tau_min)
-        hardwts, indices = self.net.sample_architecture(tau)
+        hardwts, indices = self.sample_path(tau)
+        casso = self.method == "casso"
 
-        node_keys = self.net.active_node_keys(indices)
-        for u in node_keys:
-            self.sharing_count[u] = self.sharing_count.get(u, 0) + 1
-
-        if t > self.warmup_steps and t % self.cfg.refresh_interval == 0 and sensitivity_batches:
-            self.refresh_sensitivity(sensitivity_batches)
+        node_keys = self.net.active_node_keys(indices) if casso else None
+        if casso:
+            for u in node_keys:
+                self.sharing_count[u] = self.sharing_count.get(u, 0) + 1
+            if t > self.warmup_steps and t % self.cfg.refresh_interval == 0 and sensitivity_batches:
+                self.refresh_sensitivity(sensitivity_batches, tau=tau)
 
         x, y = next(train_iter)
         x, y = x.to(self.device), y.to(self.device)
-
         active_logits = self.net(x, hardwts, indices)
-        active_params = self.net.active_params(indices)
 
+        if casso:
+            loss_dict = self._mmlf_loss(active_logits, y, hardwts, indices)
+            loss = loss_dict["total"]
+        else:
+            loss = self.criterion(active_logits, y)
+
+        self.w_optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        # Clip only the supernet weights: phi receives gradient from this loss
+        # through the straight-through weights, but phi is never updated by
+        # this optimizer, so its gradient must not rescale W's update.
+        torch.nn.utils.clip_grad_norm_(self.w_params, max_norm=5.0)
+        self.w_optimizer.step()
+        self.w_scheduler.step()
+        if casso:
+            self.ema.update(self.net)
+
+        # GDAS bi-level step: update phi on a validation batch. The uniform
+        # sampler (SPOS-style) has no learned sampling distribution.
+        if self.sampler == "gdas":
+            vx, vy = next(val_iter)
+            vx, vy = vx.to(self.device), vy.to(self.device)
+            val_hardwts, val_indices = self.net.sample_architecture(tau)
+            val_loss = self.criterion(self.net(vx, val_hardwts, val_indices), vy)
+            self.phi_optimizer.zero_grad(set_to_none=True)
+            val_loss.backward()
+            self.phi_optimizer.step()
+
+        if casso:
+            arch_id = self._next_archive_id
+            self._next_archive_id += 1
+            kappa = self._kappa(node_keys) if self.omega else 0.0
+            payload = ArchivedSample(indices.detach().cpu(), node_keys, kappa,
+                                      (x[:8].detach().cpu(), y[:8].detach().cpu()))
+            self.archive_payloads[arch_id] = payload
+            _, evicted = self.archive.offer(arch_id, kappa, payload)
+            for evicted_key in evicted:
+                self.archive_payloads.pop(evicted_key, None)
+
+        return {"loss": loss.item(), "acc": accuracy(active_logits, y), "tau": tau}
+
+    def _mmlf_loss(self, active_logits, y, hardwts, indices) -> Dict[str, torch.Tensor]:
+        """Eq. 10 for the active path, with replay_k archive members drawn
+        uniformly at random from the archive each step."""
+        active_params = self.net.active_params(indices)
         archived_logits, archived_targets, archived_params_list = [], [], []
         active_on_replay_logits = []
         f_bar: Dict[int, float] = {}
         if self.archive.members and self.omega:
-            archive_nodes = [self.archive_payloads[k].node_keys for k in self.archive.members]
+            members = list(self.archive.members)
+            archive_nodes = [self.archive_payloads[k].node_keys for k in members]
             f_bar = layerwise_sensitivity_weight(archive_nodes, self.omega, self.s_bar,
                                                   self._layer_of_node)
-            for key in list(self.archive.members)[:min(3, len(self.archive.members))]:
+            for key in self._rng.sample(members, min(self.replay_k, len(members))):
                 sample = self.archive_payloads[key]
                 ax, ay = sample.replay_batch
                 ax, ay = ax.to(self.device), ay.to(self.device)
                 a_hardwts = torch.zeros_like(hardwts)
-                for e_idx in range(a_hardwts.shape[0]):
-                    a_hardwts[e_idx, sample.indices[e_idx]] = 1.0
-                logits_i = self.net(ax, a_hardwts, sample.indices)
-                archived_logits.append(logits_i)
+                a_hardwts[torch.arange(a_hardwts.shape[0]), sample.indices.to(self.device)] = 1.0
+                archived_logits.append(self.net(ax, a_hardwts, sample.indices))
                 archived_targets.append(ay)
                 archived_params_list.append(self.net.active_params(sample.indices))
-                # Active architecture's prediction on this SAME replay batch
-                # (same ax), needed for a valid same-input KL comparison
-                # (Eq. 10, term 4) -- comparing against active_logits (which
-                # was computed on the unrelated, differently-sized main
-                # training batch x) would be both shape-mismatched and
-                # conceptually meaningless.
+                # Active path on the SAME replay inputs, for a same-input KL
+                # comparison (Eq. 10, term 4).
                 active_on_replay_logits.append(self.net(ax, hardwts, indices))
 
         layer_weights: Dict[int, list] = {}
@@ -194,45 +264,12 @@ class CASSOSearcher:
                 layer_weights.setdefault(layer, []).append(p)
                 ema_weights.setdefault(layer, []).append(self.ema.get(name))
 
-        loss_dict = self.mmlf(
+        return self.mmlf(
             active_logits, y, active_params,
             archived_logits, archived_targets, archived_params_list,
             layer_weights, ema_weights, f_bar,
             active_on_replay_logits=active_on_replay_logits,
         )
-
-        self.w_optimizer.zero_grad(set_to_none=True)
-        loss_dict["total"].backward()
-        torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=5.0)
-        self.w_optimizer.step()
-        self.w_scheduler.step()
-        self.ema.update(self.net)
-
-        # GDAS bi-level: update architecture logits on a validation batch.
-        vx, vy = next(val_iter)
-        vx, vy = vx.to(self.device), vy.to(self.device)
-        val_hardwts, val_indices = self.net.sample_architecture(tau)
-        val_logits = self.net(vx, val_hardwts, val_indices)
-        val_loss = self.criterion(val_logits, vy)
-        self.phi_optimizer.zero_grad(set_to_none=True)
-        val_loss.backward()
-        self.phi_optimizer.step()
-
-        arch_id = self._next_archive_id
-        self._next_archive_id += 1
-        kappa = self._kappa(node_keys) if self.omega else 0.0
-        payload = ArchivedSample(indices.detach().cpu(), node_keys, kappa,
-                                  (x[:8].detach().cpu(), y[:8].detach().cpu()))
-        self.archive_payloads[arch_id] = payload
-        _, evicted = self.archive.offer(arch_id, kappa, payload)
-        for evicted_key in evicted:
-            self.archive_payloads.pop(evicted_key, None)
-
-        return {
-            "loss": loss_dict["total"].item(),
-            "acc": accuracy(active_logits, y),
-            "tau": tau,
-        }
 
     def best_architecture(self, val_loader) -> torch.Tensor:
         """Sec. 3.7: select the architecture that minimizes L_val using

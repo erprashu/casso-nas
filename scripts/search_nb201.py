@@ -55,6 +55,16 @@ def main():
     # taken verbatim from the paper -- flagged here rather than silently
     # presented as if it were.
     parser.add_argument("--dataset", default="cifar10", choices=["cifar10", "cifar100"])
+    parser.add_argument("--sampler", default="gdas", choices=["gdas", "uniform"],
+                         help="gdas: Gumbel-softmax over learned logits; uniform: SPOS-style")
+    parser.add_argument("--method", default="casso", choices=["casso", "vanilla"],
+                         help="casso: MMLF with archive; vanilla: plain cross-entropy baseline")
+    parser.add_argument("--beta", type=float, default=None, help="override MMLF replay weight")
+    parser.add_argument("--gamma", type=float, default=None, help="override MMLF EMA-stability weight")
+    parser.add_argument("--eta", type=float, default=None, help="override MMLF KL weight")
+    parser.add_argument("--no_search_split", action="store_true",
+                         help="use the CIFAR test split for the phi update (old behavior); "
+                              "by default search uses disjoint halves of the training set")
     parser.add_argument("--epochs", type=int, default=193,
                          help="calibrated to match the paper's ~34560s search cost on this "
                               "GPU; the paper itself does not state an explicit epoch count "
@@ -113,7 +123,8 @@ def main():
         }
         hf_dir = default_hf_dirs[args.dataset]
     train_loader, val_loader = get_cifar_loaders(args.dataset, args.data_dir, args.batch_size,
-                                                  hf_parquet_dir=hf_dir)
+                                                  hf_parquet_dir=hf_dir,
+                                                  search_split=not args.no_search_split)
     train_iter = infinite_loader(train_loader)
     val_iter = infinite_loader(val_loader)
     steps_per_epoch = len(train_loader)
@@ -126,9 +137,14 @@ def main():
     oracle = NB201Oracle(args.nb201_pkl)
 
     cfg = CASSOConfig()
+    for name in ("beta", "gamma", "eta"):
+        if getattr(args, name) is not None:
+            setattr(cfg, name, getattr(args, name))
+    print(f"MMLF weights: beta={cfg.beta} gamma={cfg.gamma} eta={cfg.eta}", flush=True)
     net = NB201Supernet(num_classes=10 if args.dataset == "cifar10" else 100,
                          base_channels=args.base_channels)
-    searcher = CASSOSearcher(net, cfg, device, total_steps=total_steps, warmup_steps=warmup_steps)
+    searcher = CASSOSearcher(net, cfg, device, total_steps=total_steps, warmup_steps=warmup_steps,
+                             sampler=args.sampler, method=args.method, rng_seed=args.seed)
     print(f"Supernet params: {sum(p.numel() for p in net.parameters()):,}", flush=True)
 
     sens_batches = [next(train_iter) for _ in range(cfg.num_minibatches)]
