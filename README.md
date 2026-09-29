@@ -102,6 +102,15 @@ SEED=0 PY=python3 bash scripts/official_queue.sh
 # Ranking fidelity, derived architecture and its benchmark accuracy for a
 # saved checkpoint
 python3 scripts/eval_official_ckpt.py --ckpt runs/official/cifar10_s0_gdas_casso_e250.pth
+
+# Seeds 0-2, all four configurations (the matched-seed comparison of the
+# paper's Sec. 4.5.13 / Table 15). Several copies of the queue can run at
+# once: each job is locked while it runs, so every copy takes a different job.
+JOBS="$(for s in 0 1 2; do for c in gdas:vanilla gdas:casso uniform:vanilla uniform:casso; do printf '%s:%s ' $s $c; done; done)" \
+    bash scripts/official_queue.sh
+
+# Table 15: Kendall-tau, top-1/top-5 selected accuracy, mean +- std over seeds
+python3 scripts/summarize_official.py
 ```
 
 Evaluation uses batch statistics in every BatchNorm layer: the official
@@ -142,5 +151,7 @@ for the exact hyperparameter defaults used in the paper's experiments.
   optimizer, gradient clipping covers only the supernet weights, and replayed
   archive members are drawn at random (`replay_k`) instead of always the
   first three.
-- Added `scripts/official_nb201.py`, `scripts/official_queue.sh` and
-  `scripts/eval_official_ckpt.py` (section above).
+- Added `scripts/official_nb201.py`, `scripts/official_queue.sh`,
+  `scripts/eval_official_ckpt.py` and `scripts/summarize_official.py` (section
+  above). The queue takes one lock per job, so several copies can run jobs in
+  parallel.
